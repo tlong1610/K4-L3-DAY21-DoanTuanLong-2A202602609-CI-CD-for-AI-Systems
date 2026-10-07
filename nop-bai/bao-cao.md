@@ -17,7 +17,7 @@ HƯỚNG DẪN - đọc rồi XÓA TOÀN BỘ các khối chú thích này sau k
 | MSSV | 2A202602609 |
 | Lớp / Khóa | K4 |
 | Repo GitHub | https://github.com/tlong1610/K4-L3-DAY21-DoanTuanLong-2A202602609-CI-CD-for-AI-Systems |
-| Ngày nộp | ___ |
+| Ngày nộp | 07/10/2026 |
 
 ---
 
@@ -45,13 +45,11 @@ Tập Adult mất cân bằng: chỉ 24,8% mẫu thuộc lớp thu nhập > 50K.
 
 ## 3. Khó Khăn Gặp Phải và Cách Giải Quyết
 
-<!-- Nêu 2 - 3 khó khăn thật, mỗi ô một câu ngắn. -->
-
 | Khó khăn | Nguyên nhân | Cách giải quyết |
 |---|---|---|
-| ___ | ___ | ___ |
-| ___ | ___ | ___ |
-| ___ | ___ | ___ |
+| Hướng dẫn viết cho GCP nhưng em chỉ có tài khoản AWS. | Code mẫu dùng `google-cloud-storage`, GCS và GCE. | Chuyển sang S3 + EC2 + `boto3` + `dvc[s3]`; CI dùng IAM user chỉ có quyền trên bucket, VM đọc model qua IAM role nên không cần copy file key. |
+| `import mlflow` lỗi trên máy cá nhân (Python 3.12). | Venv mới thiếu `pkg_resources`, còn SQLAlchemy 2.1 đã bỏ class mà mlflow 2.13 cần. | Ghim `setuptools<81` và `sqlalchemy<2.1` trong `requirements.txt` để cả máy cá nhân lẫn CI cài giống nhau. |
+| `git push` không kích hoạt pipeline; DagsHub báo không tìm thấy experiment. | Repo là fork nên Actions bị tắt mặc định; DagsHub không có experiment "Default". | Bật Actions cho fork; `train.py` tạo experiment theo biến `MLFLOW_EXPERIMENT_NAME`. |
 
 ---
 
@@ -75,10 +73,8 @@ thêm thông tin mới" được đánh giá cao hơn kết luận sai rằng th
 
 ## 5. Phần Bonus Đã Thực Hiện (nếu có)
 
-<!-- Xóa cả mục 5 nếu không làm bonus. Mỗi bonus tối đa 1 dòng. -->
-
-- [ ] Bonus 1 - Tracking MLflow từ xa với DagsHub: ___
-- [ ] Bonus 2 - Điều chỉnh ngưỡng quyết định: ___
-- [ ] Bonus 3 - Báo cáo precision / recall tự động: ___
-- [ ] Bonus 4 - Hoàn trả về phiên bản trước: ___
-- [ ] Bonus 5 - Cảnh báo lệch lạc dữ liệu: ___
+- [x] Bonus 1 - Tracking MLflow từ xa với DagsHub: job Train ghi mọi run vào experiment `income-classifier-ci` trên DagsHub (ảnh `06-dagshub-mlflow.png`).
+- [x] Bonus 2 - Điều chỉnh ngưỡng quyết định: ngưỡng 0,30 nâng F1 từ 0,7149 lên 0,7368 vì mô hình đang thiên về lớp đa số; ghi `best_threshold` vào `report.json` và MLflow.
+- [x] Bonus 3 - Báo cáo precision / recall tự động: `src/evaluate.py` ghi `outputs/detail.txt` (lớp >50K: precision 0,81, recall 0,64; FN=45, FP=18). Nếu mục tiêu là tìm khách hàng thu nhập cao thì bỏ sót (FN) tốn kém hơn, nên nên ưu tiên recall bằng ngưỡng thấp hơn.
+- [x] Bonus 4 - Hoàn trả về phiên bản trước: Train chỉ upload vào `artifacts/candidate/<sha>/`; Release so F1 với `artifacts/current/report.json`, chỉ đưa lên `current` và restart VM khi F1 mới ≥ F1 cũ, kết quả so sánh in trong log.
+- [x] Bonus 5 - Cảnh báo lệch lạc dữ liệu: `train.py` tính `positive_rate` (0,248), in `::warning::` nếu lệch > 5 điểm % so với 24,8% và ghi vào `report.json`.
