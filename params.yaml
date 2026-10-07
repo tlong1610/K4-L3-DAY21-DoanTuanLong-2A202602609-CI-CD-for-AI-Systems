@@ -1,5 +1,5 @@
 # Sieu tham so cho mo hinh GradientBoostingClassifier
-# THU NGHIEM: bo tham so yeu de kiem tra quality gate chan Release (f1 < 0.65)
-n_estimators: 10
-learning_rate: 0.01
-max_depth: 1
+# Bo tot nhat tu Buoc 1 (F1 = 0.7149 tren holdout)
+n_estimators: 200
+learning_rate: 0.1
+max_depth: 5
