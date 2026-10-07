@@ -6,8 +6,19 @@ on:
     paths:
       - 'data/**.dvc'
       - 'src/**.py'
+      - 'tests/**.py'
       - 'params.yaml'
+      - 'requirements.txt'
+      - '.github/workflows/cicd.yml'
   workflow_dispatch:
+
+# Khong cho hai lan release chay chong len nhau
+concurrency:
+  group: income-cicd
+  cancel-in-progress: false
+
+env:
+  F1_THRESHOLD: "0.65"
 
 jobs:
 
@@ -26,18 +37,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+          cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Run unit tests
-        # TODO 1: Viet lenh de chay pytest tren thu muc tests/ voi co -v
-        run: # <dien lenh o day>
+        run: pytest tests/ -v
 
 
   # ---------------------------------------------------------------------------
   # JOB 2 - TRAIN
-  # Xac thuc cloud storage, pull du lieu bang DVC, huan luyen mo hinh, upload artifact.
+  # Xac thuc S3, pull du lieu bang DVC, huan luyen mo hinh, upload artifact.
+  # Model duoc upload vao artifacts/candidate/<sha>/ - chi duoc dua len
+  # artifacts/current/ o job Release sau khi qua quality gate.
   # Chi chay khi Job 1 (Unit Test) hoan thanh thanh cong.
   # ---------------------------------------------------------------------------
   train:
@@ -53,53 +66,90 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+          cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Authenticate to Cloud Storage
-        # TODO 2: Ghi noi dung credentials ra file tam va set bien moi truong xac thuc.
-        # GCP:   echo '${{ secrets.STORAGE_CREDENTIALS }}' > /tmp/sa-key.json
-        #        echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/sa-key.json" >> $GITHUB_ENV
-        # AWS:   echo "AWS_ACCESS_KEY_ID=..." >> $GITHUB_ENV  (lay tu secrets)
-        #        echo "AWS_SECRET_ACCESS_KEY=..." >> $GITHUB_ENV
-        # Azure: echo "AZURE_STORAGE_CONNECTION_STRING=..." >> $GITHUB_ENV
+        # STORAGE_CREDENTIALS = {"aws_access_key_id": "...", "aws_secret_access_key": "...", "region": "..."}
+        env:
+          STORAGE_CREDENTIALS: ${{ secrets.STORAGE_CREDENTIALS }}
         run: |
-          # <dien code o day>
+          KEY_ID=$(jq -r .aws_access_key_id <<< "$STORAGE_CREDENTIALS")
+          SECRET=$(jq -r .aws_secret_access_key <<< "$STORAGE_CREDENTIALS")
+          REGION=$(jq -r '.region // "us-east-1"' <<< "$STORAGE_CREDENTIALS")
+          echo "::add-mask::$KEY_ID"
+          echo "::add-mask::$SECRET"
+          {
+            echo "AWS_ACCESS_KEY_ID=$KEY_ID"
+            echo "AWS_SECRET_ACCESS_KEY=$SECRET"
+            echo "AWS_DEFAULT_REGION=$REGION"
+          } >> "$GITHUB_ENV"
+
+      - name: Configure MLflow tracking (DagsHub)
+        # Bonus 1: neu co secrets DagsHub thi ghi run len DagsHub, neu khong thi ghi ./mlruns
+        env:
+          DAGSHUB_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          DAGSHUB_USER: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+        run: |
+          if [ -n "$DAGSHUB_URI" ]; then
+            {
+              echo "MLFLOW_TRACKING_URI=$DAGSHUB_URI"
+              echo "MLFLOW_TRACKING_USERNAME=$DAGSHUB_USER"
+              echo "MLFLOW_TRACKING_PASSWORD=$DAGSHUB_TOKEN"
+              echo "MLFLOW_EXPERIMENT_NAME=income-classifier-ci"
+            } >> "$GITHUB_ENV"
+            echo "MLflow tracking: $DAGSHUB_URI"
+          else
+            echo "Khong co secret DagsHub, MLflow ghi vao ./mlruns"
+          fi
 
       - name: Pull data with DVC
-        # TODO 3: Pull cac file du lieu can thiet tu cloud storage bang lenh dvc pull.
-        #         Chi pull train_batch1.csv va holdout.csv (khong can train_batch2.csv).
-        run: # <dien lenh o day>
+        run: dvc pull data/train_batch1.csv.dvc data/holdout.csv.dvc
 
       - name: Train model
+        # Bonus 5: train.py in canh bao lech du lieu neu ty le lop duong lech > 5 diem %
         run: python src/train.py
+
+      - name: Precision / recall report
+        # Bonus 3: confusion matrix + precision/recall tung lop -> outputs/detail.txt
+        run: python src/evaluate.py
 
       - name: Read report
         id: read_report
-        # TODO 4: Doc gia tri "f1_score" tu outputs/report.json bang Python inline.
-        #         Set ket qua thanh output "f1" de job quality-gate co the doc.
-        #
-        # Goi y:
-        #   F1=$(python -c "import json; d=json.load(open('outputs/report.json')); print(d['f1_score'])")
-        #   echo "f1=$F1" >> $GITHUB_OUTPUT
         run: |
-          # <dien code o day>
+          F1=$(python -c "import json; print(json.load(open('outputs/report.json'))['f1_score'])")
+          echo "f1=$F1" >> "$GITHUB_OUTPUT"
+          echo "f1_score = $F1"
+          cat outputs/report.json
 
       - name: Upload model to Cloud Storage
-        # TODO 5: Su dung cloud SDK de upload models/model.joblib len
-        #         <bucket>/artifacts/current/model.joblib.
-        #         Ten bucket lay tu secret ARTIFACT_BUCKET.
+        env:
+          ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
         run: |
           python - <<'PYEOF'
-          # <dien code Python o day>
+          import os
+          import boto3
+
+          bucket = os.environ["ARTIFACT_BUCKET"]
+          prefix = f"artifacts/candidate/{os.environ['GITHUB_SHA']}"
+          s3 = boto3.client("s3")
+          for local, name in [("models/model.joblib", "model.joblib"),
+                              ("outputs/report.json", "report.json"),
+                              ("outputs/detail.txt", "detail.txt")]:
+              s3.upload_file(local, bucket, f"{prefix}/{name}")
+              print(f"Uploaded {local} -> s3://{bucket}/{prefix}/{name}")
           PYEOF
 
       - name: Save report as artifact
         uses: actions/upload-artifact@v4
         with:
           name: report
-          path: outputs/report.json
+          path: |
+            outputs/report.json
+            outputs/detail.txt
 
 
   # ---------------------------------------------------------------------------
@@ -119,45 +169,108 @@ jobs:
     steps:
 
       - name: Check quality gate
-        # TODO 6: Doc f1 tu output cua job train.
-        #         Neu f1 < 0.65, ket thuc voi loi ro rang.
-        #         Neu dat nguong, in thong bao va tiep tuc.
-        #
-        # Goi y:
-        #   f1 = float("${{ needs.train.outputs.f1 }}")
-        #   if f1 < 0.65:
-        #       raise SystemExit(f"FAILED: f1_score {f1:.4f} < 0.65. Huy trien khai.")
-        #   print("PASSED: dang trien khai model.")
+        env:
+          F1: ${{ needs.train.outputs.f1 }}
         run: |
           python - <<'PYEOF'
-          # <dien code Python o day>
+          import os
+
+          f1 = float(os.environ["F1"])
+          threshold = float(os.environ["F1_THRESHOLD"])
+          if f1 < threshold:
+              raise SystemExit(f"FAILED: f1_score {f1:.4f} < {threshold}. Huy trien khai.")
+          print(f"PASSED: f1_score {f1:.4f} >= {threshold}. Dang trien khai model.")
           PYEOF
 
 
   # ---------------------------------------------------------------------------
   # JOB 4 - RELEASE
-  # Trien khai len VM qua SSH.
+  # Bonus 4: so sanh F1 moi voi F1 cua model dang chay, chi trien khai khi
+  # F1 moi >= F1 cu. Sau do dua candidate len artifacts/current/ va restart VM.
   # Chi chay khi Job 3 (Quality Gate) hoan thanh thanh cong.
   # ---------------------------------------------------------------------------
   release:
     name: Release
     needs: quality-gate
     runs-on: ubuntu-latest
+    env:
+      ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
     steps:
 
+      - name: Authenticate to Cloud Storage
+        env:
+          STORAGE_CREDENTIALS: ${{ secrets.STORAGE_CREDENTIALS }}
+        run: |
+          KEY_ID=$(jq -r .aws_access_key_id <<< "$STORAGE_CREDENTIALS")
+          SECRET=$(jq -r .aws_secret_access_key <<< "$STORAGE_CREDENTIALS")
+          REGION=$(jq -r '.region // "us-east-1"' <<< "$STORAGE_CREDENTIALS")
+          echo "::add-mask::$KEY_ID"
+          echo "::add-mask::$SECRET"
+          {
+            echo "AWS_ACCESS_KEY_ID=$KEY_ID"
+            echo "AWS_SECRET_ACCESS_KEY=$SECRET"
+            echo "AWS_DEFAULT_REGION=$REGION"
+          } >> "$GITHUB_ENV"
+
+      - name: Compare with current model
+        id: compare
+        run: |
+          CANDIDATE="s3://$ARTIFACT_BUCKET/artifacts/candidate/$GITHUB_SHA"
+          aws s3 cp "$CANDIDATE/report.json" new_report.json
+          if aws s3 cp "s3://$ARTIFACT_BUCKET/artifacts/current/report.json" old_report.json 2>/dev/null; then
+            echo "Tim thay report cua model dang chay."
+          else
+            echo "Chua co model nao dang chay (lan trien khai dau tien)."
+          fi
+          python - <<'PYEOF'
+          import json, os
+
+          new_f1 = json.load(open("new_report.json"))["f1_score"]
+          if os.path.exists("old_report.json"):
+              old_f1 = json.load(open("old_report.json"))["f1_score"]
+              deploy = new_f1 >= old_f1
+              print(f"F1 cu (dang chay): {old_f1:.4f}")
+              print(f"F1 moi (candidate): {new_f1:.4f}")
+              print(f"Chenh lech: {new_f1 - old_f1:+.4f}")
+          else:
+              deploy = True
+              print(f"F1 moi (candidate): {new_f1:.4f} - khong co model cu de so sanh")
+          if deploy:
+              print("KET QUA: F1 moi >= F1 cu -> TRIEN KHAI model moi.")
+          else:
+              print("KET QUA: F1 moi < F1 cu -> HUY TRIEN KHAI, giu nguyen model dang chay.")
+              print("::warning title=Rollback guard::F1 moi thap hon model dang chay, khong trien khai.")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"deploy={'true' if deploy else 'false'}\n")
+          PYEOF
+
+      - name: Promote candidate to current
+        if: steps.compare.outputs.deploy == 'true'
+        run: |
+          CANDIDATE="s3://$ARTIFACT_BUCKET/artifacts/candidate/$GITHUB_SHA"
+          CURRENT="s3://$ARTIFACT_BUCKET/artifacts/current"
+          aws s3 cp "$CANDIDATE/model.joblib" "$CURRENT/model.joblib"
+          aws s3 cp "$CANDIDATE/report.json" "$CURRENT/report.json"
+          aws s3 cp "$CANDIDATE/detail.txt" "$CURRENT/detail.txt"
+
       - name: SSH deploy to VM
+        if: steps.compare.outputs.deploy == 'true'
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            # TODO 7: Restart service income-api tren VM.
-            # TODO 8: Cho server san sang roi goi curl /healthz de xac nhan.
-            #         Neu health check that bai sau nhieu lan thu, thoat voi exit 1.
-            #
-            # Goi y:
-            #   sudo systemctl restart income-api
-            #   sleep 5
-            #   curl -sf http://localhost:8080/healthz && echo "Health check passed." || exit 1
-            # <dien lenh bash o day>
+            sudo systemctl restart income-api
+            for i in $(seq 1 12); do
+              sleep 5
+              if curl -sf http://localhost:8080/healthz; then
+                echo ""
+                echo "Health check passed."
+                exit 0
+              fi
+              echo "Cho server khoi dong... ($i/12)"
+            done
+            echo "Health check failed."
+            sudo journalctl -u income-api -n 30 --no-pager
+            exit 1
